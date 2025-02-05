@@ -1,122 +1,252 @@
-# 📄 Kaleido Finance Bot 🤖
+// miner.js
+import axios from 'axios'
+import chalk from 'chalk'
+import * as fs from 'fs/promises';
+import { readFile } from 'fs/promises';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
+import {displayBanner} from './banner.js';
 
-**Version:** Beta
+class KaleidoMiningBot {
+    constructor(wallet, botIndex) {
+        this.wallet = wallet;
+        this.botIndex = botIndex;
+        this.currentEarnings = { total: 0, pending: 0, paid: 0 };
+        this.miningState = {
+            isActive: false,
+            worker: "quantum-rig-1",
+            pool: "quantum-1",
+            startTime: null
+        };
+        this.referralBonus = 0;
+        this.stats = {
+            hashrate: 75.5,
+            shares: { accepted: 0, rejected: 0 },
+            efficiency: 1.4,
+            powerUsage: 120
+        };
+        this.sessionFile = `session_${wallet}.json`;
+        
+        this.api = axios.create({
+            baseURL: 'https://kaleidofinance.xyz/api/testnet',
+            headers: {
+                'Content-Type': 'application/json',
+                'Referer': 'https://kaleidofinance.xyz/testnet',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36'
+            }
+        });
+    }
 
-Welcome to **Kaleido Finance Bot**, an advanced mining management tool designed for optimized performance and effortless multi-wallet mining. 
+    async loadSession() {
+        try {
+            const data = await fs.readFile(this.sessionFile, 'utf8');
+            const session = JSON.parse(data);
+            this.miningState.startTime = session.startTime;
+            this.currentEarnings = session.earnings;
+            this.referralBonus = session.referralBonus;
+            console.log(chalk.green(`[Wallet ${this.botIndex}] Previous session loaded successfully`));
+            return true;
+        } catch (error) {
+            return false;
+        }
+    }
 
-## 🚀 Key Features
+    async saveSession() {
+        const sessionData = {
+            startTime: this.miningState.startTime,
+            earnings: this.currentEarnings,
+            referralBonus: this.referralBonus
+        };
+        
+        try {
+            await fs.writeFile(this.sessionFile, JSON.stringify(sessionData, null, 2));
+        } catch (error) {
+            console.error(chalk.red(`[Wallet ${this.botIndex}] Failed to save session:`, error.message));
+        }
+    }
 
-- **Multi-Wallet Mining Support:** Manage multiple wallets simultaneously with ease.
-- **Real-Time Earnings Dashboard:** Track your mining earnings in real-time.
-- **Automatic Pending → Paid Conversion:** Automate your earnings conversion.
-- **Quantum Hash Algorithm Implementation:** Optimized for quantum mining efficiency.
-- **Auto-Retry with Exponential Backoff:** Handle network issues smoothly.
-- **Detailed Mining Statistics & Analytics:** Gain deep insights into your mining performance.
-- **Cross-Platform Compatibility:** Works on Windows, macOS, and Linux.
+    async initialize() {
+        try {
+            // 1. Check registration status
+            const regResponse = await this.retryRequest(
+                () => this.api.get(`/check-registration?wallet=${this.wallet}`),
+                "Registration check"
+            );
 
-## 📝 Registration
+            if (!regResponse.data.isRegistered) {
+                throw new Error('Wallet not registered');
+            }
 
-> **Note:** You must successfully register an account to use the bot tool.
+            // 2. Try to load previous session
+            const hasSession = await this.loadSession();
+            
+            if (!hasSession) {
+                // Only initialize new values if no previous session exists
+                this.referralBonus = regResponse.data.userData.referralBonus;
+                this.currentEarnings = {
+                    total: regResponse.data.userData.referralBonus || 0,
+                    pending: 0,
+                    paid: 0
+                };
+                this.miningState.startTime = Date.now();
+            }
 
-Register for the beta version here:
-[https://kaleidofinance.xyz/testnet?ref=TCEZQ4F3](https://kaleidofinance.xyz/testnet?ref=TCEZQ4F3)
+            // 3. Start mining session
+            this.miningState.isActive = true;
+            
+            console.log(chalk.green(`[Wallet ${this.botIndex}] Mining ${hasSession ? 'resumed' : 'initialized'} successfully`));
+            await this.startMiningLoop();
 
-## ⚙️ Configuration
+        } catch (error) {
+            console.error(chalk.red(`[Wallet ${this.botIndex}] Initialization failed:`), error.message);
+        }
+    }
 
-### **Pools:**
-- **ID:** `quantum-1` - **Name:** `Quantum Surge Pool`
-- **ID:** `neural-1` - **Name:** `Neural Network Pool`
-- **ID:** `chaos-1` - **Name:** `Chaos Matrix Pool`
+    async retryRequest(requestFn, operationName, retries = 3) {
+        for (let i = 0; i < retries; i++) {
+            try {
+                return await requestFn();
+            } catch (error) {
+                if (i === retries - 1) throw error;
+                console.log(chalk.yellow(`[${operationName}] Retrying (${i + 1}/${retries})...`));
+                await new Promise(resolve => setTimeout(resolve, 2000 * (i + 1)));
+            }
+        }
+    }
 
-### **Workers:**
-- **ID:** `quantum-rig-1` - **Name:** `Quantum Accelerator`
-- **ID:** `neural-node-1` - **Name:** `Neural Processor`
-- **ID:** `chaos-engine-1` - **Name:** `Chaos Engine`
-- **ID:** `quantum-rig-2` - **Name:** `Quantum Lite`
-- **ID:** `neural-node-2` - **Name:** `Neural Lite`
-- **ID:** `chaos-engine-2` - **Name:** `Chaos Lite`
-- **ID:** `hybrid-miner-1` - **Name:** `Hybrid Miner`
+    calculateEarnings() {
+        const timeElapsed = (Date.now() - this.miningState.startTime) / 1000;
+        return (this.stats.hashrate * timeElapsed * 0.0001) * (1 + this.referralBonus);
+    }
 
-You can modify the IDs and Names above directly in the code for custom configurations.
+    async updateBalance(finalUpdate = false) {
+        try {
+            const newEarnings = this.calculateEarnings();
+            const payload = {
+                wallet: this.wallet,
+                earnings: {
+                    total: this.currentEarnings.total + newEarnings,
+                    pending: finalUpdate ? 0 : newEarnings,
+                    paid: finalUpdate ? this.currentEarnings.paid + newEarnings : this.currentEarnings.paid
+                }
+            };
 
-### 🔧 **How to Edit IDs:**
+            const response = await this.retryRequest(
+                () => this.api.post('/update-balance', payload),
+                "Balance update"
+            );
 
-To change the **Worker ID** and **Pool ID**, follow these steps:
+            if (response.data.success) {
+                this.currentEarnings = {
+                    total: response.data.balance,
+                    pending: finalUpdate ? 0 : newEarnings,
+                    paid: finalUpdate ? this.currentEarnings.paid + newEarnings : this.currentEarnings.paid
+                };
+                
+                await this.saveSession();
+                this.logStatus(finalUpdate);
+            }
+        } catch (error) {
+            console.error(chalk.red(`[Wallet ${this.botIndex}] Update failed:`), error.message);
+        }
+    }
 
-1. Open the file `miner.js`.
-2. Go to **line 17-18**:
-   ```javascript
-   worker: "quantum-rig-1",
-   pool: "quantum-1",
-   ```
-3. Replace `quantum-rig-1` with your preferred **Worker ID** and `quantum-1` with your preferred **Pool ID** from the list above.
-4. Save the file after editing.
+    logStatus(final = false) {
+        const statusType = final ? "Final Status" : "Mining Status";
+        const uptime = ((Date.now() - this.miningState.startTime) / 1000).toFixed(0);
+        
+        console.log(chalk.yellow(`
+        === [Wallet ${this.botIndex}] ${statusType} ===
+        Wallet: ${this.wallet}
+        Uptime: ${uptime}s | Active: ${this.miningState.isActive}
+        Hashrate: ${this.stats.hashrate} MH/s
+        Total: ${chalk.cyan(this.currentEarnings.total.toFixed(8))} KLDO
+        Pending: ${chalk.yellow(this.currentEarnings.pending.toFixed(8))} KLDO
+        Paid: ${chalk.green(this.currentEarnings.paid.toFixed(8))} KLDO
+        Referral Bonus: ${chalk.magenta(`+${(this.referralBonus * 100).toFixed(1)}%`)}
+        `));
+    }
 
-### ⚙️ **Adjusting Mining Parameters:**
+    async startMiningLoop() {
+        while (this.miningState.isActive) {
+            await this.updateBalance();
+            await new Promise(resolve => setTimeout(resolve, 30000)); // Update every 30 seconds
+        }
+    }
 
-For each Worker, you can customize the mining parameters in `miner.js` by modifying the following section:
-```javascript
-this.stats = {
-    hashrate: 75.5,        // Adjust based on worker performance
-    shares: { accepted: 0, rejected: 0 },
-    efficiency: 1.4,       // Adjust for optimal efficiency
-    powerUsage: 120        // Set power usage according to worker's hardware
-};
-```
+    async stop() {
+        this.miningState.isActive = false;
+        await this.updateBalance(true);
+        await this.saveSession();
+        return this.currentEarnings.paid;
+    }
+}
 
-### 🔍 **Mining Parameters (Default Settings):**
+export class MiningCoordinator {
+    static instance = null;
+    
+    constructor() {
+        // Singleton pattern to prevent multiple instances
+        if (MiningCoordinator.instance) {
+            return MiningCoordinator.instance;
+        }
+        MiningCoordinator.instance = this;
+        
+        this.bots = [];
+        this.totalPaid = 0;
+        this.isRunning = false;
+    }
 
-- **Quantum Accelerator:** Hashrate: 75.5 MH/s, Efficiency: 1.4, Power Usage: 120W
-- **Neural Processor:** Hashrate: 45.5 MH/s, Efficiency: 1.1, Power Usage: 110W
-- **Chaos Engine:** Hashrate: 55.5 MH/s, Efficiency: 1.2, Power Usage: 130W
-- **Hybrid Miner:** Hashrate: 40.5 MH/s, Efficiency: 1.0, Power Usage: 100W
-- **Quantum Lite:** Hashrate: 35.5 MH/s, Efficiency: 0.9, Power Usage: 90W
-- **Neural Lite:** Hashrate: 30.5 MH/s, Efficiency: 0.85, Power Usage: 85W
-- **Chaos Lite:** Hashrate: 25.5 MH/s, Efficiency: 0.8, Power Usage: 80W
+    async loadWallets() {
+        try {
+            const __dirname = dirname(fileURLToPath(import.meta.url));
+            const data = await readFile(join(__dirname, 'wallets.txt'), 'utf8');
+            return data.split('\n')
+                .map(line => line.trim())
+                .filter(line => line.startsWith('0x'));
+        } catch (error) {
+            console.error('Error loading wallets:', error.message);
+            return [];
+        }
+    }
 
-- **Hashrate:** The mining speed (measured in MH/s).
-- **Shares (Accepted/Rejected):** Track accepted/rejected mining shares.
-- **Efficiency:** Optimize mining performance.
-- **Power Usage:** Adjust power consumption settings based on your hardware.
+    async start() {
+        // Prevent multiple starts
+        if (this.isRunning) {
+            console.log(chalk.yellow('Mining coordinator is already running'));
+            return;
+        }
+        
+        this.isRunning = true;
+        displayBanner();
+        const wallets = await this.loadWallets();
+        
+        if (wallets.length === 0) {
+            console.log(chalk.red('No valid wallets found in wallets.txt'));
+            return;
+        }
 
-Make sure to adjust these values to match the capabilities of each worker for optimal performance.
+        console.log(chalk.blue(`Loaded ${wallets.length} wallets\n`));
 
-## 🚀 Installation Guide
+        // Initialize all bots
+        this.bots = wallets.map((wallet, index) => {
+            const bot = new KaleidoMiningBot(wallet, index + 1);
+            bot.initialize();
+            return bot;
+        });
 
-1. **Clone the Repository:**
-   ```bash
-   git clone https://github.com/rpchubs/Kaleido-Finance-Bot.git
-   cd Kaleido-Finance-Bot
-   ```
-
-2. **Install Dependencies:**
-   ```bash
-   npm install
-   ```
-
-3. **Setup Wallets:**
-   Create a `wallets.txt` file and add your wallet addresses (one per line):
-   ```bash
-   nano wallets.txt
-   ```
-
-4. **Run the Bot:**
-   ```bash
-   npm run start
-   ```
-
-## 💡 Contribution
-
-Contributions are welcome! Feel free to submit pull requests to improve the bot.
-
-## 🔐 License
-
-This project is licensed under the MIT License.
-
-## 📢 Support
-
-For support, join our community on Telegram:
-[https://t.me/RPC_Hubs](https://t.me/RPC_Hubs)
-
-Happy Mining! 🚀
-
+        // Handle shutdown
+        process.on('SIGINT', async () => {
+            console.log(chalk.yellow('\nShutting down miners...'));
+            this.totalPaid = (await Promise.all(this.bots.map(bot => bot.stop())))
+                .reduce((sum, paid) => sum + paid, 0);
+            
+            console.log(chalk.green(`
+            === Final Summary ===
+            Total Wallets: ${this.bots.length}
+            Total Paid: ${this.totalPaid.toFixed(8)} KLDO
+            `));
+            process.exit();
+        });
+    }
+}
